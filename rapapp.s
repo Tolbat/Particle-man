@@ -101,6 +101,132 @@ RAPTOR_PRE_Object_List:
 RAPTOR_POST_Object_List:
         rts
 
+; Particle-Man targets the 128-byte Atari-compatible EEPROM configuration used
+; by the current GameDrive launch path. GameDrive also supports larger EEPROM
+; images, but JagStudio 1.11's bundled routines send 13-bit CAT93C86 commands
+; for a 2 KB Jagtopus EEPROM. These project-local entry points keep the 64-word,
+; nine-bit protocol isolated from RAPTOR and return 0 on a verified write.
+
+PAC_EE64_GPIO_0       equ     $f14800
+PAC_EE64_GPIO_1       equ     $f15000
+PAC_EE64_GPIO_0OF     equ     PAC_EE64_GPIO_0-JOYSTICK
+PAC_EE64_GPIO_1OF     equ     PAC_EE64_GPIO_1-JOYSTICK
+PAC_EE64_READ         equ     %110000000
+PAC_EE64_EWEN         equ     %100110000
+PAC_EE64_WRITE        equ     %101000000
+PAC_EE64_EWDS         equ     %100000000
+
+        .globl  pacEEPROM64Read
+pacEEPROM64Read:
+        movem.l d1-d3/a0,-(sp)
+        move.l  20(sp),d1
+        bsr     pacEEPROM64ReadRaw
+        movem.l (sp)+,d1-d3/a0
+        rts
+
+        .globl  pacEEPROM64Write
+pacEEPROM64Write:
+        movem.l d1-d4/a0,-(sp)
+        move.l  24(sp),d1
+        move.l  28(sp),d0
+        bsr     pacEEPROM64WriteWord
+        movem.l (sp)+,d1-d4/a0
+        rts
+
+pacEEPROM64WriteWord:
+        move.l  d2,-(sp)
+        move.w  d0,d2
+        bsr     pacEEPROM64WriteRaw
+        bsr     pacEEPROM64ReadRaw
+        cmp.w   d0,d2
+        bne.s   .write_bad
+        moveq   #0,d0
+        bra.s   .write_done
+.write_bad:
+        moveq   #1,d0
+.write_done:
+        move.l  (sp)+,d2
+        rts
+
+pacEEPROM64WriteRaw:
+        movem.l a0/d0-d3,-(sp)
+        lea     JOYSTICK,a0
+        tst.w   PAC_EE64_GPIO_1OF(a0)
+        move.w  #PAC_EE64_EWEN,d2
+        bsr     pacEEPROM64Out9
+        tst.w   PAC_EE64_GPIO_1OF(a0)
+        andi.w  #$3f,d1
+        ori.w   #PAC_EE64_WRITE,d1
+        move.w  d1,d2
+        bsr     pacEEPROM64Out9
+        move.w  d0,d2
+        bsr     pacEEPROM64Out16
+        tst.w   PAC_EE64_GPIO_1OF(a0)
+
+        ; The serial part permits 5 ms. A bounded 6 ms wait also behaves
+        ; consistently under GameDrive firmware before the read-back check.
+        move.w  #2874,d0
+.write_wait:
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        dbra    d0,.write_wait
+
+        move.w  #PAC_EE64_EWDS,d2
+        bsr     pacEEPROM64Out9
+        tst.w   PAC_EE64_GPIO_1OF(a0)
+        movem.l (sp)+,a0/d0-d3
+        rts
+
+pacEEPROM64ReadRaw:
+        movem.l a0/d1-d3,-(sp)
+        lea     JOYSTICK,a0
+        tst.w   PAC_EE64_GPIO_1OF(a0)
+        andi.w  #$3f,d1
+        ori.w   #PAC_EE64_READ,d1
+        move.w  d1,d2
+        bsr     pacEEPROM64Out9
+        moveq   #0,d0
+        moveq   #15,d3
+.read_loop:
+        tst.w   PAC_EE64_GPIO_0OF(a0)
+        nop
+        move.w  (a0),d1
+        lsr.w   #1,d1
+        addx.w  d0,d0
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        dbra    d3,.read_loop
+        movem.l (sp)+,a0/d1-d3
+        rts
+
+pacEEPROM64Out16:
+        rol.w   #1,d2
+        moveq   #15,d3
+        bra.s   pacEEPROM64OutLoop
+
+pacEEPROM64Out9:
+        rol.w   #8,d2
+        moveq   #8,d3
+pacEEPROM64OutLoop:
+        move.w  d2,PAC_EE64_GPIO_0OF(a0)
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        rol.w   #1,d2
+        dbra    d3,pacEEPROM64OutLoop
+        rts
+
         include "RAPINIT.S"
         include "jagstudio_pad_zero.inc"
 

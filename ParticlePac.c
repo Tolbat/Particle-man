@@ -1,6 +1,10 @@
 #include "common.h"
 #include "credit_art.h"
 
+extern short pacEEPROM64Read(short address) asm ("pacEEPROM64Read");
+extern short pacEEPROM64Write(short address, short value)
+    asm ("pacEEPROM64Write");
+
 /* Particle-Man campaign build. Persistent imagery and actors remain Object
    Processor work. The 68000 owns compact game state and event publication;
    RAPTOR's GPU simulates and plots the bounded particle pool. */
@@ -60,8 +64,10 @@
 #define PAC_EXTRA_LIFE_FIRST 15000
 #define PAC_EXTRA_LIFE_SECOND 50000
 #define PAC_MAX_LIVES 5
-#define PAC_EEPROM_MAGIC 0x504d414eUL
-#define PAC_EEPROM_PROGRESS_MAGIC 0x4c564c32UL
+#define PAC_EEPROM_RECORD_BASE 0
+#define PAC_EEPROM_RECORD_MAGIC 0x504dU
+#define PAC_EEPROM_RECORD_VERSION 0x1901U
+#define PAC_EEPROM_RECORD_COMMIT 0x4f4bU
 #define PAC_DASH_RECHARGE_NTSC 75
 #define PAC_DASH_RECHARGE_PAL 63
 #define PAC_FRIGHTENED_WARNING_NTSC 120
@@ -989,33 +995,78 @@ static void pacPlaySound(PAC_Game *game, int sound)
                        Zero_Audio_8bit_Signed);
 }
 
+static unsigned int pacEEPROMReadWord(int offset)
+{
+    return (unsigned int)(unsigned short)
+        pacEEPROM64Read((short)(PAC_EEPROM_RECORD_BASE + offset));
+}
+
+static void pacEEPROMWriteWord(int offset, unsigned int value)
+{
+    short address = (short)(PAC_EEPROM_RECORD_BASE + offset);
+    short word = (short)(value & 0xffffU);
+    /* The local 64-word driver verifies every write. Retry once if the serial
+       EEPROM did not echo the requested word on its first attempt. */
+    if (pacEEPROM64Write(address, word) != 0)
+        pacEEPROM64Write(address, word);
+}
+
+static unsigned int pacSaveChecksum(const int *scores, int highest_unlocked)
+{
+    unsigned int checksum = 0x6d2bU ^ PAC_EEPROM_RECORD_MAGIC ^
+        PAC_EEPROM_RECORD_VERSION ^ (unsigned int)highest_unlocked;
+    int index;
+    for (index = 0; index < PAC_SCORE_COUNT; ++index)
+    {
+        unsigned int score = (unsigned int)scores[index];
+        checksum = ((checksum << 3) | (checksum >> 13)) & 0xffffU;
+        checksum ^= (score >> 16) & 0xffffU;
+        checksum = ((checksum << 3) | (checksum >> 13)) & 0xffffU;
+        checksum ^= score & 0xffffU;
+    }
+    return checksum & 0xffffU;
+}
+
+static int pacLoadCompactSave(void)
+{
+    int saved_scores[PAC_SCORE_COUNT];
+    int highest_unlocked;
+    int index;
+    if (pacEEPROMReadWord(0) != PAC_EEPROM_RECORD_MAGIC ||
+        pacEEPROMReadWord(1) != PAC_EEPROM_RECORD_VERSION ||
+        pacEEPROMReadWord(14) != PAC_EEPROM_RECORD_COMMIT) return 0;
+    for (index = 0; index < PAC_SCORE_COUNT; ++index)
+    {
+        unsigned int high = pacEEPROMReadWord(2 + index * 2);
+        unsigned int low = pacEEPROMReadWord(3 + index * 2);
+        unsigned int score = (high << 16) | low;
+        if (score > 9999999U) return 0;
+        saved_scores[index] = (int)score;
+    }
+    for (index = 1; index < PAC_SCORE_COUNT; ++index)
+        if (saved_scores[index] > saved_scores[index - 1]) return 0;
+    highest_unlocked = (int)pacEEPROMReadWord(12);
+    if (highest_unlocked < 1 || highest_unlocked > PAC_LEVEL_MAX) return 0;
+    if (pacEEPROMReadWord(13) !=
+        pacSaveChecksum(saved_scores, highest_unlocked)) return 0;
+    for (index = 0; index < PAC_SCORE_COUNT; ++index)
+        pac_scores[index] = saved_scores[index];
+    pac_highest_unlocked = highest_unlocked;
+    return 1;
+}
+
+static void pacSaveScores(void);
+
 static void pacLoadScores(void)
 {
     int index;
-    int valid = 1;
     for (index = 0; index < PAC_SCORE_COUNT; ++index) pac_scores[index] = 0;
-    jsfEEPROMUserDataRead();
-    if ((unsigned int)rapUserSaveData[0] != PAC_EEPROM_MAGIC) valid = 0;
-    for (index = 0; index < PAC_SCORE_COUNT; ++index)
-        if (rapUserSaveData[index + 1] < 0 ||
-            rapUserSaveData[index + 1] > 9999999) valid = 0;
-    for (index = 1; index < PAC_SCORE_COUNT; ++index)
-        if (rapUserSaveData[index + 1] > rapUserSaveData[index]) valid = 0;
-    if (valid)
+    if (!pacLoadCompactSave())
     {
-        for (index = 0; index < PAC_SCORE_COUNT; ++index)
-            pac_scores[index] = rapUserSaveData[index + 1];
-        if ((unsigned int)rapUserSaveData[7] == PAC_EEPROM_PROGRESS_MAGIC &&
-            rapUserSaveData[6] >= 1 &&
-            rapUserSaveData[6] <= PAC_LEVEL_MAX)
-            pac_highest_unlocked = rapUserSaveData[6];
-        else
-            pac_highest_unlocked = 1;
-    }
-    else
-    {
-        for (index = 0; index < 128; ++index) rapUserSaveData[index] = 0;
         pac_highest_unlocked = 1;
+        /* The release launch path currently exposes a 64-word cartridge save.
+           Initialize a blank or incompatible file in that compatible format. */
+        pacSaveScores();
     }
     pac_selected_level = pac_highest_unlocked;
     pac_top_score = pac_scores[0];
@@ -1024,12 +1075,22 @@ static void pacLoadScores(void)
 static void pacSaveScores(void)
 {
     int index;
-    rapUserSaveData[0] = (int)PAC_EEPROM_MAGIC;
+    /* Invalidate first, then commit last. The complete record occupies only
+       words 0-14, so it fits the current 64-word GameDrive configuration and
+       also remains valid when a larger EEPROM image is configured. */
+    pacEEPROMWriteWord(14, 0U);
+    pacEEPROMWriteWord(0, PAC_EEPROM_RECORD_MAGIC);
+    pacEEPROMWriteWord(1, PAC_EEPROM_RECORD_VERSION);
     for (index = 0; index < PAC_SCORE_COUNT; ++index)
-        rapUserSaveData[index + 1] = pac_scores[index];
-    rapUserSaveData[6] = pac_highest_unlocked;
-    rapUserSaveData[7] = (int)PAC_EEPROM_PROGRESS_MAGIC;
-    jsfEEPROMUserDataWrite();
+    {
+        unsigned int score = (unsigned int)pac_scores[index];
+        pacEEPROMWriteWord(2 + index * 2, score >> 16);
+        pacEEPROMWriteWord(3 + index * 2, score);
+    }
+    pacEEPROMWriteWord(12, (unsigned int)pac_highest_unlocked);
+    pacEEPROMWriteWord(13,
+        pacSaveChecksum(pac_scores, pac_highest_unlocked));
+    pacEEPROMWriteWord(14, PAC_EEPROM_RECORD_COMMIT);
 }
 
 static void pacSubmitScore(PAC_Game *game)
@@ -3086,9 +3147,34 @@ static int pacSingleHeldDirection(int held)
     return PAC_DIR_NONE;
 }
 
+static int pacDirectionPadBit(int direction)
+{
+    if (direction == PAC_DIR_UP) return JAGPAD_UP;
+    if (direction == PAC_DIR_LEFT) return JAGPAD_LEFT;
+    if (direction == PAC_DIR_DOWN) return JAGPAD_DOWN;
+    if (direction == PAC_DIR_RIGHT) return JAGPAD_RIGHT;
+    return 0;
+}
+
+static int pacHeldLegalDirection(PAC_Game *game, int held)
+{
+    int direction;
+    int preferred = game->queued_direction;
+    if ((held & pacDirectionPadBit(preferred)) &&
+        pacPlayerCanMove(&game->player, preferred)) return preferred;
+    preferred = game->player.direction;
+    if ((held & pacDirectionPadBit(preferred)) &&
+        pacPlayerCanMove(&game->player, preferred)) return preferred;
+    for (direction = PAC_DIR_UP; direction <= PAC_DIR_RIGHT; ++direction)
+        if ((held & pacDirectionPadBit(direction)) &&
+            pacPlayerCanMove(&game->player, direction)) return direction;
+    return PAC_DIR_NONE;
+}
+
 static void pacQueueDirection(PAC_Game *game, int held, int pressed)
 {
     int direction = pacDirectionFromBits(pressed);
+    int legal_direction;
     game->player_drive = (held & PAC_DIRECTION_MASK) != 0;
     /* Some real-pad rolls change cardinal state without yielding a useful
        neutral/new-edge frame. A single held cardinal is therefore refreshed
@@ -3099,6 +3185,15 @@ static void pacQueueDirection(PAC_Game *game, int held, int pressed)
     /* READY also accepts a diagonal held before Start. */
     if (direction == PAC_DIR_NONE && game->phase == PAC_PHASE_READY)
         direction = pacDirectionFromBits(held);
+    /* At a stopped junction, diagonal pad input must not leave a blocked
+       priority direction queued while another held direction is open. */
+    if (game->player.offset == 0 &&
+        !pacPlayerCanMove(&game->player, game->player.direction))
+    {
+        legal_direction = pacHeldLegalDirection(game,
+            (pressed & PAC_DIRECTION_MASK) != 0 ? pressed : held);
+        if (legal_direction != PAC_DIR_NONE) direction = legal_direction;
+    }
     if (direction != PAC_DIR_NONE) game->queued_direction = direction;
 }
 
@@ -3486,12 +3581,19 @@ static void pacConsumePellet(PAC_Game *game, unsigned char *canvas)
                        game->player.tile_x, game->player.tile_y);
 }
 
-static void pacChoosePlayer(PAC_Game *game)
+static void pacChoosePlayer(PAC_Game *game, int held)
 {
+    int direction;
     if (pacPlayerCanMove(&game->player, game->queued_direction))
         game->player.direction = game->queued_direction;
     else if (!pacPlayerCanMove(&game->player, game->player.direction))
-        game->player.direction = PAC_DIR_NONE;
+    {
+        /* A diagonal can report two held bits but only one new edge. If the
+           queued edge is blocked, take any legal held direction immediately. */
+        direction = pacHeldLegalDirection(game, held);
+        game->player.direction = direction;
+        if (direction != PAC_DIR_NONE) game->queued_direction = direction;
+    }
 }
 
 static void pacApplyCornerAssist(PAC_Game *game)
@@ -3526,7 +3628,7 @@ static void pacApplyCornerAssist(PAC_Game *game)
     player->direction = direction;
 }
 
-static void pacPlayerStep(PAC_Game *game, unsigned char *canvas)
+static void pacPlayerStep(PAC_Game *game, unsigned char *canvas, int held)
 {
     int movement = game->player.speed;
     int remaining;
@@ -3535,7 +3637,7 @@ static void pacPlayerStep(PAC_Game *game, unsigned char *canvas)
     if (game->player.offset == 0)
     {
         pacConsumePellet(game, canvas);
-        pacChoosePlayer(game);
+        pacChoosePlayer(game, held);
     }
     while (movement > 0 && game->player.direction != PAC_DIR_NONE)
     {
@@ -3553,7 +3655,7 @@ static void pacPlayerStep(PAC_Game *game, unsigned char *canvas)
             pacWrap(&game->player);
             game->player.offset = 0;
             pacConsumePellet(game, canvas);
-            pacChoosePlayer(game);
+            pacChoosePlayer(game, held);
         }
     }
 }
@@ -5187,7 +5289,7 @@ void basicmain(void)
                 }
             }
             pacUpdatePrismPressure(&game);
-            pacPlayerStep(&game, game_canvas);
+            pacPlayerStep(&game, game_canvas, held);
             pacMagnetStep(&game, game_canvas, frame);
             pacWarpStep(&game);
             pacUpdateFruit(&game, game_canvas);
