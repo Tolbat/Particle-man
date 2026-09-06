@@ -85,7 +85,7 @@ extern short pacEEPROM64Write(short address, short value)
     (JAGPAD_UP | JAGPAD_LEFT | JAGPAD_DOWN | JAGPAD_RIGHT)
 #define PAC_READY_CONTINUE_MASK \
     (PAC_DIRECTION_MASK | PAC_START_MASK | JAGPAD_OPTION)
-#define PAC_TURN_GRACE 64 /* One quarter tile before/after a junction. */
+#define PAC_TURN_GRACE 96 /* About 5 horizontal / 3 vertical pixels; below half a tile. */
 /* Unsigned conversion preserves negative wrap-lane coordinates as a defined
    16.16 bit pattern without adding a function call to actor publication. */
 #define PAC_SCREEN_FIXED(coordinate) (((unsigned int)(coordinate)) << 16)

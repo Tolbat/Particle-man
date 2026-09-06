@@ -7,7 +7,7 @@ gameplay audio are used.
 
 ## Release-candidate status
 
-Current source: **C19e GameDrive-save candidate**. C19 closes the release self-audit
+Current source: **C19f Beta turn-grace candidate**. C19 closes the release self-audit
 without changing the accepted movement cadence, D-pad rules, campaign size,
 roster, Object Processor/GPU split or finite starting inventory. Performance
 diagnostic code and controls have been removed from the runtime; the shipping
@@ -18,6 +18,9 @@ C19d corrected stopped-corner input. C19e replaces the incompatible JagStudio
 current 128-byte GameDrive save configuration. Real-hardware power-cycle
 retention remains the final Beta blocker.
 
+C19f widens the still-bounded buffered-turn window after the first Beta report
+found that fast chases made narrow-path turns unnecessarily easy to miss.
+
 C19b preloads the complete Credits, Title and Hall pages behind an advancing
 `POWERING PARTICLE-MAN` startup card. Attract transitions now publish an
 already-built phrase-aligned page at VBL instead of constructing the next page
@@ -26,7 +29,7 @@ immediately to Title; a separate subsequent press starts the selected run.
 
 C13 is the latest user-accepted smooth real-Jaguar gameplay baseline. C14-C16
 then made contained input and presentation corrections: held-D-pad movement,
-symmetric quarter-tile corner grace, finite starting actions, physical `C B A`
+symmetric bounded corner grace, finite starting actions, physical `C B A`
 labels, a waiting first-run instruction card, single-action button arbitration
 and independent title-letter colors. Those corrections, plus the C17 release
 configuration, plus the C18 completion work, require one final real-hardware
